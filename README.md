@@ -72,7 +72,19 @@ Response:
 
 ### `GET /list`
 
-List all registered services.
+List all registered services as a map of service name to its description.
+
+```json
+{ "auth": "authentication service", "worker": "background job runner" }
+```
+
+The key is the service name and the value is its description. Because the key is
+the name, multiple instances sharing a name collapse into one entry; use
+`/{name}/list` to see every instance.
+
+### `GET /{name}/list`
+
+List all instances registered under `name`, as an array of full service objects.
 
 ```json
 [
@@ -80,29 +92,20 @@ List all registered services.
 ]
 ```
 
-### `GET /{name}/list`
-
-List all instances registered under `name` (same shape as `/list`).
-
 ### `/{name}/{id}/...` — proxy
 
 Forwards the request to the backend registered as `id` (verifying that its name
 matches `name`), stripping the `/{name}/{id}` prefix. The query string is
 preserved.
 
-| Request                  | Forwarded to backend |
-|--------------------------|----------------------|
-| `/api/0/`                | `/`                  |
-| `/api/0/docs`            | `/docs`              |
-| `/api/0/docs/`           | `/docs/`             |
-| `/api/0/search?q=1`      | `/search?q=1`        |
+| Request             | Forwarded to backend |
+|---------------------|----------------------|
+| `/api/0/`           | `/`                  |
+| `/api/0/docs`       | `/docs`              |
+| `/api/0/search?q=1` | `/search?q=1`        |
 
-There must be a **`/` right after `{id}`** — i.e. the request needs the form
-`/{name}/{id}/<rest>`. `/api/0/` (forwarded as `/`) and `/api/0/docs` (no final
-slash, forwarded as `/docs`) are both valid; only `/api/0` (nothing after the
-id) returns `404`. The separating slash makes the `{id}` segment behave like a
-directory prefix, so relative links and assets in the backend's responses
-resolve correctly in the browser.
+The request must be `/{name}/{id}/<rest>` — there has to be a `/` after `{id}`.
+`/api/0` (nothing after the id) returns `404`.
 
 If the backend cannot be reached, the proxy returns `502 Bad Gateway` and the
 service is removed from the registry.
