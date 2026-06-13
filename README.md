@@ -47,6 +47,11 @@ The returned `id` is globally unique and auto-incremented. A service must keep
 its `id` to know its routing path. Registering the same `name` twice yields two
 different ids, which lets you run multiple instances under one name.
 
+Registration is **idempotent by `url`**: reporting in again from the same port
+returns the existing `id` (and refreshes its `name`/`description`) instead of
+creating a duplicate entry. The trailing slash is normalized, so
+`http://host:8081` and `http://host:8081/` are treated as the same backend.
+
 ### `POST /unregistry`
 
 Deregister a service.

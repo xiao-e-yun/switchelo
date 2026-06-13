@@ -102,15 +102,28 @@ async fn register(
     State(state): State<AppState>,
     Json(req): Json<RegisterReq>,
 ) -> Json<RegisterRes> {
+    // Trim trailing slash to avoid double slashes when forwarding.
+    let url = req.url.trim_end_matches('/').to_string();
+
+    let mut services = state.services.write().unwrap();
+
+    // Idempotent by url: a repeated report from the same port is treated as the
+    // same service. Reuse the existing id and refresh its name/description.
+    if let Some((&id, existing)) = services.iter_mut().find(|(_, s)| s.url == url) {
+        existing.name = req.name.clone();
+        existing.description = req.description;
+        tracing::info!(id, name = %req.name, url = %url, "service re-registered (existing id reused)");
+        return Json(RegisterRes { success: true, id });
+    }
+
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
     let service = Service {
         name: req.name.clone(),
-        // Trim trailing slash to avoid double slashes when forwarding.
-        url: req.url.trim_end_matches('/').to_string(),
+        url: url.clone(),
         description: req.description,
     };
-    state.services.write().unwrap().insert(id, service);
-    tracing::info!(id, name = %req.name, url = %req.url, "service registered");
+    services.insert(id, service);
+    tracing::info!(id, name = %req.name, url = %url, "service registered");
     Json(RegisterRes { success: true, id })
 }
 
