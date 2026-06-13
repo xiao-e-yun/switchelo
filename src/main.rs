@@ -71,15 +71,14 @@ impl ServiceInfo {
     }
 }
 
-/// GET /list — list all registered services.
-async fn list_all(State(state): State<AppState>) -> Json<Vec<ServiceInfo>> {
+/// GET /list — list all registered services as { name: description }.
+async fn list_all(State(state): State<AppState>) -> Json<HashMap<String, String>> {
     let services = state.services.read().unwrap();
-    let mut list: Vec<ServiceInfo> = services
-        .iter()
-        .map(|(id, s)| ServiceInfo::from(*id, s))
+    let map: HashMap<String, String> = services
+        .values()
+        .map(|s| (s.name.clone(), s.description.clone()))
         .collect();
-    list.sort_by_key(|i| i.id);
-    Json(list)
+    Json(map)
 }
 
 /// GET /{name}/list — list all instances under the given name.
