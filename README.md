@@ -92,8 +92,8 @@ preserved.
 
 | Request                  | Forwarded to backend |
 |--------------------------|----------------------|
+| `/api/0/`                | `/`                  |
 | `/api/0/docs`            | `/docs`              |
-| `/api/0/`               | `/`                  |
 | `/api/0/search?q=1`      | `/search?q=1`        |
 
 The **trailing slash is required**: `/api/0/` is valid, but `/api/0` (no
