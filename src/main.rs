@@ -231,6 +231,30 @@ async fn proxy(State(state): State<AppState>, req: Request) -> Response {
     }
 }
 
+/// Best-effort discovery of the primary LAN IP. Opens a UDP socket and
+/// "connects" it to a public address; no packets are sent, but the OS picks
+/// the outbound interface, whose local address is the LAN IP.
+fn local_ip() -> Option<std::net::IpAddr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    socket.local_addr().ok().map(|a| a.ip())
+}
+
+/// Print the reachable API endpoints on startup.
+fn print_endpoints(bound: std::net::SocketAddr) {
+    let port = bound.port();
+    println!("switchelo is running:");
+    if bound.ip().is_unspecified() {
+        // Bound to 0.0.0.0 / [::] -> reachable on loopback and the LAN.
+        println!("  http://localhost:{port}/");
+        if let Some(ip) = local_ip() {
+            println!("  http://{ip}:{port}/");
+        }
+    } else {
+        println!("  http://{bound}/");
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -269,6 +293,9 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    if let Ok(bound) = listener.local_addr() {
+        print_endpoints(bound);
+    }
     tracing::info!("switchelo listening on {addr}");
     if let Err(e) = axum::serve(listener, app).await {
         eprintln!("error: server stopped: {e}");
