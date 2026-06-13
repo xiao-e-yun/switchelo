@@ -94,10 +94,15 @@ preserved.
 |--------------------------|----------------------|
 | `/api/0/`                | `/`                  |
 | `/api/0/docs`            | `/docs`              |
+| `/api/0/docs/`           | `/docs/`             |
 | `/api/0/search?q=1`      | `/search?q=1`        |
 
-The **trailing slash is required**: `/api/0/` is valid, but `/api/0` (no
-trailing slash) returns `404`.
+There must be a **`/` right after `{id}`** — i.e. the request needs the form
+`/{name}/{id}/<rest>`. `/api/0/` (forwarded as `/`) and `/api/0/docs` (no final
+slash, forwarded as `/docs`) are both valid; only `/api/0` (nothing after the
+id) returns `404`. The separating slash makes the `{id}` segment behave like a
+directory prefix, so relative links and assets in the backend's responses
+resolve correctly in the browser.
 
 If the backend cannot be reached, the proxy returns `502 Bad Gateway` and the
 service is removed from the registry.
