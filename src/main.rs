@@ -255,7 +255,23 @@ async fn main() {
         .with_state(state);
 
     let addr = std::env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            eprintln!(
+                "error: address {addr} is already in use \
+                 (another switchelo instance? set BIND to a free port)"
+            );
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("error: failed to bind {addr}: {e}");
+            std::process::exit(1);
+        }
+    };
     tracing::info!("switchelo listening on {addr}");
-    axum::serve(listener, app).await.unwrap();
+    if let Err(e) = axum::serve(listener, app).await {
+        eprintln!("error: server stopped: {e}");
+        std::process::exit(1);
+    }
 }
