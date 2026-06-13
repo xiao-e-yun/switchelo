@@ -10,16 +10,16 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-/// 一筆已註冊的後端服務。
+/// A registered backend service.
 #[derive(Clone, Debug)]
 struct Service {
     name: String,
-    /// 後端基底位址，例如 http://127.0.0.1:8081
+    /// Backend base address, e.g. http://127.0.0.1:8081
     url: String,
     description: String,
 }
 
-/// 共享狀態：註冊表 + 自增 id 產生器 + HTTP client。
+/// Shared state: registry + auto-increment id generator + HTTP client.
 #[derive(Clone)]
 struct AppState {
     services: Arc<RwLock<HashMap<u64, Service>>>,
@@ -51,7 +51,7 @@ struct UnregisterRes {
     success: bool,
 }
 
-/// 對外公開的服務資訊（給 /list 與 /{name}/list 使用）。
+/// Public-facing service info (used by /list and /{name}/list).
 #[derive(Serialize)]
 struct ServiceInfo {
     id: u64,
@@ -71,7 +71,7 @@ impl ServiceInfo {
     }
 }
 
-/// GET /list —— 列出所有已註冊服務。
+/// GET /list — list all registered services.
 async fn list_all(State(state): State<AppState>) -> Json<Vec<ServiceInfo>> {
     let services = state.services.read().unwrap();
     let mut list: Vec<ServiceInfo> = services
@@ -82,7 +82,7 @@ async fn list_all(State(state): State<AppState>) -> Json<Vec<ServiceInfo>> {
     Json(list)
 }
 
-/// GET /{name}/list —— 列出指定 name 底下的所有實例。
+/// GET /{name}/list — list all instances under the given name.
 async fn list_by_name(
     State(state): State<AppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
@@ -97,7 +97,7 @@ async fn list_by_name(
     Json(list)
 }
 
-/// POST /registry —— 服務主動報到。
+/// POST /registry — a service registers itself.
 async fn register(
     State(state): State<AppState>,
     Json(req): Json<RegisterReq>,
@@ -105,7 +105,7 @@ async fn register(
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
     let service = Service {
         name: req.name.clone(),
-        // 去掉尾端斜線，避免轉發時出現雙斜線。
+        // Trim trailing slash to avoid double slashes when forwarding.
         url: req.url.trim_end_matches('/').to_string(),
         description: req.description,
     };
@@ -114,7 +114,7 @@ async fn register(
     Json(RegisterRes { success: true, id })
 }
 
-/// POST /unregistry —— 服務優雅下線。
+/// POST /unregistry — a service gracefully goes offline.
 async fn unregister(
     State(state): State<AppState>,
     Json(req): Json<UnregisterReq>,
@@ -126,27 +126,27 @@ async fn unregister(
     Json(UnregisterRes { success: removed })
 }
 
-/// 主動除名：轉發失敗時自動移除該服務。
+/// Active deregistration: remove a service automatically when forwarding fails.
 fn deregister(state: &AppState, id: u64) {
     if state.services.write().unwrap().remove(&id).is_some() {
         tracing::warn!(id, "service deregistered due to forwarding failure");
     }
 }
 
-/// 依路徑轉發：GET/POST/... /{name}/{id}/...
-/// 會剝離 /{name}/{id} 前綴後轉發到後端基底位址。
+/// Path-based forwarding: GET/POST/... /{name}/{id}/...
+/// Strips the /{name}/{id} prefix and forwards to the backend base address.
 async fn proxy(State(state): State<AppState>, req: Request) -> Response {
-    // 從路徑手動解析 name 與 id（避免 Path extractor 在 wildcard/trailing-slash
-    // 情境下的參數數量不一致問題）。
+    // Parse name and id from the path manually (avoids the Path extractor's
+    // argument-count mismatch in wildcard/trailing-slash cases).
     let path = req.uri().path().to_string();
-    let mut segs = path.splitn(4, '/').skip(1); // 去掉開頭空字串
+    let mut segs = path.splitn(4, '/').skip(1); // drop the leading empty segment
     let name = segs.next().unwrap_or("").to_string();
     let id: u64 = match segs.next().and_then(|s| s.parse().ok()) {
         Some(v) => v,
         None => return (StatusCode::NOT_FOUND, "invalid path").into_response(),
     };
 
-    // 查表取得目標服務。
+    // Look up the target service.
     let service = {
         let services = state.services.read().unwrap();
         match services.get(&id) {
@@ -160,8 +160,8 @@ async fn proxy(State(state): State<AppState>, req: Request) -> Response {
         }
     };
 
-    // 計算剝離前綴後的剩餘路徑。
-    // 只接受帶尾斜線的形式 /{name}/{id}/...，/{name}/{id} 視為錯誤。
+    // Compute the remaining path after stripping the prefix.
+    // Only accept the trailing-slash form /{name}/{id}/...; /{name}/{id} is an error.
     let prefix = format!("/{name}/{id}");
     let rest = match path.strip_prefix(&prefix) {
         Some(r) if r.starts_with('/') => r,
@@ -180,7 +180,7 @@ async fn proxy(State(state): State<AppState>, req: Request) -> Response {
         .unwrap_or_default();
     let target = format!("{}{}{}", service.url, rest, query);
 
-    // 重組請求送往後端。
+    // Rebuild the request and send it to the backend.
     let method = req.method().clone();
     let headers = req.headers().clone();
     let body = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
@@ -210,7 +210,7 @@ async fn proxy(State(state): State<AppState>, req: Request) -> Response {
                 .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
         }
         Err(err) => {
-            // 連不上後端 -> 主動除名。
+            // Backend unreachable -> active deregistration.
             tracing::warn!(%target, error = %err, "forwarding failed");
             deregister(&state, id);
             (StatusCode::BAD_GATEWAY, "upstream unavailable").into_response()
@@ -237,7 +237,7 @@ async fn main() {
         .route("/unregistry", post(unregister))
         .route("/list", get(list_all))
         .route("/{name}/list", get(list_by_name))
-        // 其餘所有路徑都進入動態轉發處理。
+        // All other paths go to the dynamic forwarding handler.
         .fallback(proxy)
         .with_state(state);
 
