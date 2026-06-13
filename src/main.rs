@@ -6,7 +6,7 @@ use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +16,6 @@ struct Service {
     name: String,
     /// 後端基底位址，例如 http://127.0.0.1:8081
     url: String,
-    #[allow(dead_code)]
     description: String,
 }
 
@@ -50,6 +49,52 @@ struct UnregisterReq {
 #[derive(Serialize)]
 struct UnregisterRes {
     success: bool,
+}
+
+/// 對外公開的服務資訊（給 /list 與 /{name}/list 使用）。
+#[derive(Serialize)]
+struct ServiceInfo {
+    id: u64,
+    name: String,
+    url: String,
+    description: String,
+}
+
+impl ServiceInfo {
+    fn from(id: u64, s: &Service) -> Self {
+        ServiceInfo {
+            id,
+            name: s.name.clone(),
+            url: s.url.clone(),
+            description: s.description.clone(),
+        }
+    }
+}
+
+/// GET /list —— 列出所有已註冊服務。
+async fn list_all(State(state): State<AppState>) -> Json<Vec<ServiceInfo>> {
+    let services = state.services.read().unwrap();
+    let mut list: Vec<ServiceInfo> = services
+        .iter()
+        .map(|(id, s)| ServiceInfo::from(*id, s))
+        .collect();
+    list.sort_by_key(|i| i.id);
+    Json(list)
+}
+
+/// GET /{name}/list —— 列出指定 name 底下的所有實例。
+async fn list_by_name(
+    State(state): State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Json<Vec<ServiceInfo>> {
+    let services = state.services.read().unwrap();
+    let mut list: Vec<ServiceInfo> = services
+        .iter()
+        .filter(|(_, s)| s.name == name)
+        .map(|(id, s)| ServiceInfo::from(*id, s))
+        .collect();
+    list.sort_by_key(|i| i.id);
+    Json(list)
 }
 
 /// POST /registry —— 服務主動報到。
@@ -116,9 +161,18 @@ async fn proxy(State(state): State<AppState>, req: Request) -> Response {
     };
 
     // 計算剝離前綴後的剩餘路徑。
+    // 只接受帶尾斜線的形式 /{name}/{id}/...，/{name}/{id} 視為錯誤。
     let prefix = format!("/{name}/{id}");
-    let rest = path.strip_prefix(&prefix).unwrap_or("");
-    let rest = if rest.is_empty() { "/" } else { rest };
+    let rest = match path.strip_prefix(&prefix) {
+        Some(r) if r.starts_with('/') => r,
+        _ => {
+            return (
+                StatusCode::NOT_FOUND,
+                format!("invalid path: use {prefix}/ (trailing slash required)"),
+            )
+                .into_response();
+        }
+    };
     let query = req
         .uri()
         .query()
@@ -181,6 +235,8 @@ async fn main() {
     let app = Router::new()
         .route("/registry", post(register))
         .route("/unregistry", post(unregister))
+        .route("/list", get(list_all))
+        .route("/{name}/list", get(list_by_name))
         // 其餘所有路徑都進入動態轉發處理。
         .fallback(proxy)
         .with_state(state);
