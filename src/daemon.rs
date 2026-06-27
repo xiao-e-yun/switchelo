@@ -71,22 +71,10 @@ impl Daemon {
         id
     }
 
-    /// Deregister a service that is gracefully going offline.
-    /// Returns `true` if a service with that id existed.
+    /// Remove a service by id. Returns `true` if a service with that id existed.
+    /// Callers log the reason (graceful unregister vs. forwarding failure).
     pub fn unregister(&self, id: u64) -> bool {
-        let removed = self.services.write().unwrap().remove(&id).is_some();
-        if removed {
-            tracing::info!(id, "service unregistered");
-        }
-        removed
-    }
-
-    /// Active deregistration: remove a service automatically when forwarding
-    /// to it fails.
-    pub fn deregister(&self, id: u64) {
-        if self.services.write().unwrap().remove(&id).is_some() {
-            tracing::warn!(id, "service deregistered due to forwarding failure");
-        }
+        self.services.write().unwrap().remove(&id).is_some()
     }
 
     /// Snapshot of all services as a map of `name -> description`. Multiple

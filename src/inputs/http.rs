@@ -1,6 +1,6 @@
 //! HTTP input: the long-running server that exposes the registry over HTTP and
 //! performs path-based reverse proxying. It is a thin transport layer over
-//! [`Daemon`]; all registry mutations go through [`Command`].
+//! [`Daemon`]; all registry mutations go through the daemon's methods.
 
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -23,7 +23,6 @@ struct RegisterReq {
 
 #[derive(Serialize)]
 struct RegisterRes {
-    success: bool,
     id: u64,
 }
 
@@ -78,7 +77,7 @@ async fn list_by_name(
 /// POST /registry — a service registers itself.
 async fn register(State(daemon): State<Daemon>, Json(req): Json<RegisterReq>) -> Json<RegisterRes> {
     let id = daemon.register(req.name, req.url, req.description);
-    Json(RegisterRes { success: true, id })
+    Json(RegisterRes { id })
 }
 
 /// POST /unregistry — a service gracefully goes offline.
@@ -87,6 +86,9 @@ async fn unregister(
     Json(req): Json<UnregisterReq>,
 ) -> Json<UnregisterRes> {
     let success = daemon.unregister(req.id);
+    if success {
+        tracing::info!(id = req.id, "service unregistered");
+    }
     Json(UnregisterRes { success })
 }
 
@@ -162,7 +164,9 @@ async fn proxy(State(daemon): State<Daemon>, req: Request) -> Response {
         Err(err) => {
             // Backend unreachable -> active deregistration.
             tracing::warn!(%target, error = %err, "forwarding failed");
-            daemon.deregister(id);
+            if daemon.unregister(id) {
+                tracing::warn!(id, "service deregistered due to forwarding failure");
+            }
             (StatusCode::BAD_GATEWAY, "upstream unavailable").into_response()
         }
     }
