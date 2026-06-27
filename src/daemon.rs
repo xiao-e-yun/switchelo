@@ -77,24 +77,11 @@ impl Daemon {
         self.services.write().unwrap().remove(&id).is_some()
     }
 
-    /// Snapshot of all services as a map of `name -> description`. Multiple
-    /// instances sharing a name collapse into one entry.
-    pub fn list(&self) -> HashMap<String, String> {
+    /// Snapshot of every registered service, sorted by id. Inputs shape this
+    /// into whatever view they expose.
+    pub fn snapshot(&self) -> Vec<(u64, Service)> {
         let services = self.services.read().unwrap();
-        services
-            .values()
-            .map(|s| (s.name.clone(), s.description.clone()))
-            .collect()
-    }
-
-    /// All instances registered under `name`, sorted by id.
-    pub fn list_by_name(&self, name: &str) -> Vec<(u64, Service)> {
-        let services = self.services.read().unwrap();
-        let mut list: Vec<(u64, Service)> = services
-            .iter()
-            .filter(|(_, s)| s.name == name)
-            .map(|(id, s)| (*id, s.clone()))
-            .collect();
+        let mut list: Vec<(u64, Service)> = services.iter().map(|(id, s)| (*id, s.clone())).collect();
         list.sort_by_key(|(id, _)| *id);
         list
     }

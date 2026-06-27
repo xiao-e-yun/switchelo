@@ -10,6 +10,10 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
+use crate::inputs::wire::{RegisterReq, RegisterRes, UnregisterReq, UnregisterRes};
 
 /// switchelo — a dynamic service registry and reverse proxy.
 #[derive(Parser)]
@@ -50,19 +54,22 @@ pub async fn run_client(bind: &str, command: Command) {
             url,
             description,
         } => {
-            let body = serde_json::json!({
-                "name": name, "url": url, "description": description.unwrap_or_default(),
-            });
-            let text = post(&client, &format!("{base}/registry"), &body).await;
-            let id = parse_field(&text, "id");
+            let req = RegisterReq {
+                name: name.clone(),
+                url: url.clone(),
+                description: description.unwrap_or_default(),
+            };
+            let res: RegisterRes = post(&client, &format!("{base}/registry"), &req).await;
+            let id = res.id;
             println!("registered '{name}' -> {url} (id={id}); route: /{name}/{id}/");
         }
         Command::Unregister { id } => {
-            let body = serde_json::json!({ "id": id });
-            let text = post(&client, &format!("{base}/unregistry"), &body).await;
-            match parse_field(&text, "success").as_str() {
-                "true" => println!("unregistered id={id}"),
-                _ => println!("no service with id={id} was registered"),
+            let req = UnregisterReq { id };
+            let res: UnregisterRes = post(&client, &format!("{base}/unregistry"), &req).await;
+            if res.success {
+                println!("unregistered id={id}");
+            } else {
+                println!("no service with id={id} was registered");
             }
         }
     }
@@ -123,25 +130,26 @@ fn detach(_cmd: &mut std::process::Command) {
     // exit for our purposes; nothing extra is required.
 }
 
-async fn post(client: &reqwest::Client, url: &str, body: &serde_json::Value) -> String {
+/// POST `body` as JSON to `url` and deserialize the response into `R`.
+async fn post<B: Serialize, R: DeserializeOwned>(
+    client: &reqwest::Client,
+    url: &str,
+    body: &B,
+) -> R {
+    let json = serde_json::to_string(body).unwrap_or_else(|e| fail(&format!("encoding body: {e}")));
     let resp = client
         .post(url)
         .header("content-type", "application/json")
-        .body(body.to_string())
+        .body(json)
         .send()
         .await
         .unwrap_or_else(|e| fail(&format!("request to {url} failed: {e}")));
-    resp.text()
+    let text = resp
+        .text()
         .await
-        .unwrap_or_else(|e| fail(&format!("reading response from {url} failed: {e}")))
-}
-
-/// Extract a top-level field from a JSON object response as a string.
-fn parse_field(text: &str, key: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(text)
-        .ok()
-        .and_then(|v| v.get(key).map(|f| f.to_string()))
-        .unwrap_or_else(|| fail(&format!("unexpected daemon response: {text}")))
+        .unwrap_or_else(|e| fail(&format!("reading response from {url} failed: {e}")));
+    serde_json::from_str(&text)
+        .unwrap_or_else(|_| fail(&format!("unexpected daemon response: {text}")))
 }
 
 fn http_client(timeout: Duration) -> reqwest::Client {

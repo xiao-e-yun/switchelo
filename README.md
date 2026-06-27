@@ -12,7 +12,7 @@ on the URL path. Dead backends are removed automatically.
   matching backend with the `/{name}/{id}` prefix stripped.
 - **Fault tolerance** — when forwarding fails (backend unreachable), the service
   is deregistered automatically.
-- **Listing** — inspect the registry via `/list` and `/{name}/list`.
+- **Listing** — inspect the registry via `/list`.
 
 ## Architecture
 
@@ -77,7 +77,7 @@ Request:
 Response:
 
 ```json
-{ "success": true, "id": 0 }
+{ "id": 0 }
 ```
 
 The returned `id` is globally unique and auto-incremented. A service must keep
@@ -109,25 +109,23 @@ Response:
 
 ### `GET /list`
 
-List all registered services as a map of service name to its description.
+List every service grouped by name. Each entry carries the service description
+and a map of `id -> instance` for all instances running under that name.
 
 ```json
-{ "auth": "authentication service", "worker": "background job runner" }
+{
+  "api": {
+    "description": "echo service",
+    "services": {
+      "0": { "url": "http://127.0.0.1:8081" },
+      "1": { "url": "http://127.0.0.1:8082" }
+    }
+  }
+}
 ```
 
-The key is the service name and the value is its description. Because the key is
-the name, multiple instances sharing a name collapse into one entry; use
-`/{name}/list` to see every instance.
-
-### `GET /{name}/list`
-
-List all instances registered under `name`, as an array of full service objects.
-
-```json
-[
-  { "id": 0, "name": "api", "url": "http://127.0.0.1:8081", "description": "" }
-]
-```
+Instances sharing a name are grouped together; the group's `description` is taken
+from one of them.
 
 ### `/{name}/{id}/...` — proxy
 
@@ -137,12 +135,9 @@ preserved.
 
 | Request             | Forwarded to backend |
 |---------------------|----------------------|
-| `/api/0/`           | `/`                  |
+| `/api/0`            | `/`                  |
 | `/api/0/docs`       | `/docs`              |
 | `/api/0/search?q=1` | `/search?q=1`        |
-
-The request must be `/{name}/{id}/<rest>` — there has to be a `/` after `{id}`.
-`/api/0` (nothing after the id) returns `404`.
 
 If the backend cannot be reached, the proxy returns `502 Bad Gateway` and the
 service is removed from the registry.

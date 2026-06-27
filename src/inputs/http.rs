@@ -1,77 +1,32 @@
 //! HTTP input: the long-running server that exposes the registry over HTTP and
 //! performs path-based reverse proxying. It is a thin transport layer over
-//! [`Daemon`]; all registry mutations go through the daemon's methods.
+//! [`Daemon`]; all registry mutations go through the daemon's methods. The JSON
+//! shapes live in [`super::wire`], shared with the CLI client.
 
 use axum::body::Body;
-use axum::extract::{Request, State};
+use axum::extract::{Path, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::daemon::{Daemon, Service};
+use crate::daemon::Daemon;
+use crate::inputs::wire::{
+    Instance, RegisterReq, RegisterRes, ServiceGroup, UnregisterReq, UnregisterRes,
+};
 
-#[derive(Deserialize)]
-struct RegisterReq {
-    name: String,
-    url: String,
-    #[serde(default)]
-    description: String,
-}
-
-#[derive(Serialize)]
-struct RegisterRes {
-    id: u64,
-}
-
-#[derive(Deserialize)]
-struct UnregisterReq {
-    id: u64,
-}
-
-#[derive(Serialize)]
-struct UnregisterRes {
-    success: bool,
-}
-
-/// Public-facing service info (used by `/{name}/list`).
-#[derive(Serialize)]
-struct ServiceInfo {
-    id: u64,
-    name: String,
-    url: String,
-    description: String,
-}
-
-impl ServiceInfo {
-    fn from(id: u64, s: &Service) -> Self {
-        ServiceInfo {
-            id,
-            name: s.name.clone(),
-            url: s.url.clone(),
-            description: s.description.clone(),
-        }
+/// GET /list — every service grouped by name, each with its instances.
+async fn list(State(daemon): State<Daemon>) -> Json<HashMap<String, ServiceGroup>> {
+    let mut grouped: HashMap<String, ServiceGroup> = HashMap::new();
+    for (id, s) in daemon.snapshot() {
+        let group = grouped.entry(s.name).or_insert_with(|| ServiceGroup {
+            description: s.description,
+            services: HashMap::new(),
+        });
+        group.services.insert(id, Instance { url: s.url });
     }
-}
-
-/// GET /list — list all registered services as { name: description }.
-async fn list_all(State(daemon): State<Daemon>) -> Json<HashMap<String, String>> {
-    Json(daemon.list())
-}
-
-/// GET /{name}/list — list all instances under the given name.
-async fn list_by_name(
-    State(daemon): State<Daemon>,
-    axum::extract::Path(name): axum::extract::Path<String>,
-) -> Json<Vec<ServiceInfo>> {
-    let list = daemon
-        .list_by_name(&name)
-        .iter()
-        .map(|(id, s)| ServiceInfo::from(*id, s))
-        .collect();
-    Json(list)
+    Json(grouped)
 }
 
 /// POST /registry — a service registers itself.
@@ -92,45 +47,39 @@ async fn unregister(
     Json(UnregisterRes { success })
 }
 
-/// Path-based forwarding: GET/POST/... /{name}/{id}/...
-/// Strips the /{name}/{id} prefix and forwards to the backend base address.
-async fn proxy(State(daemon): State<Daemon>, req: Request) -> Response {
-    // Parse name and id from the path manually (avoids the Path extractor's
-    // argument-count mismatch in wildcard/trailing-slash cases).
-    let path = req.uri().path().to_string();
-    let mut segs = path.splitn(4, '/').skip(1); // drop the leading empty segment
-    let name = segs.next().unwrap_or("").to_string();
-    let id: u64 = match segs.next().and_then(|s| s.parse().ok()) {
-        Some(v) => v,
-        None => return (StatusCode::NOT_FOUND, "invalid path").into_response(),
-    };
+/// Proxy to the backend root: /{name}/{id}
+async fn proxy_root(
+    State(daemon): State<Daemon>,
+    Path((name, id)): Path<(String, u64)>,
+    req: Request,
+) -> Response {
+    forward(daemon, name, id, "", req).await
+}
 
-    // Look up the target service.
+/// Proxy to a backend sub-path: /{name}/{id}/{*rest}
+async fn proxy_path(
+    State(daemon): State<Daemon>,
+    Path((name, id, rest)): Path<(String, u64, String)>,
+    req: Request,
+) -> Response {
+    forward(daemon, name, id, &rest, req).await
+}
+
+/// Forward `req` to backend `id` (verifying its name) at `/{rest}`. `rest` has
+/// no leading slash; an empty `rest` targets the backend root.
+async fn forward(daemon: Daemon, name: String, id: u64, rest: &str, req: Request) -> Response {
     let service = match daemon.get(id) {
         Some(s) if s.name == name => s,
         Some(_) => return (StatusCode::NOT_FOUND, "service name/id mismatch").into_response(),
         None => return (StatusCode::NOT_FOUND, "service not found").into_response(),
     };
 
-    // Compute the remaining path after stripping the prefix.
-    // Only accept the trailing-slash form /{name}/{id}/...; /{name}/{id} is an error.
-    let prefix = format!("/{name}/{id}");
-    let rest = match path.strip_prefix(&prefix) {
-        Some(r) if r.starts_with('/') => r,
-        _ => {
-            return (
-                StatusCode::NOT_FOUND,
-                format!("invalid path: use {prefix}/ (trailing slash required)"),
-            )
-                .into_response();
-        }
-    };
     let query = req
         .uri()
         .query()
         .map(|q| format!("?{q}"))
         .unwrap_or_default();
-    let target = format!("{}{}{}", service.url, rest, query);
+    let target = format!("{}/{}{}", service.url, rest, query);
 
     // Rebuild the request and send it to the backend.
     let method = req.method().clone();
@@ -177,10 +126,12 @@ fn router(daemon: Daemon) -> Router {
     Router::new()
         .route("/registry", post(register))
         .route("/unregistry", post(unregister))
-        .route("/list", get(list_all))
-        .route("/{name}/list", get(list_by_name))
-        // All other paths go to the dynamic forwarding handler.
-        .fallback(proxy)
+        .route("/list", get(list))
+        // Path-based forwarding. axum can't bind an optional trailing capture in
+        // one handler (the 2-arg route would fail Path's arity check), so the two
+        // routes split to two handlers that share `forward`.
+        .route("/{name}/{id}", any(proxy_root))
+        .route("/{name}/{id}/{*rest}", any(proxy_path))
         .with_state(daemon)
 }
 
