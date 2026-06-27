@@ -14,15 +14,52 @@ on the URL path. Dead backends are removed automatically.
   is deregistered automatically.
 - **Listing** — inspect the registry via `/list` and `/{name}/list`.
 
+## Architecture
+
+The registry core (`src/daemon.rs`) is **transport-agnostic**: it only knows how
+to register, unregister, list, and look up services. It is driven through
+**inputs** (`src/inputs/`):
+
+- `inputs/http.rs` — the daemon's only runtime input: dynamic registration,
+  listing, and path-based proxying.
+- `inputs/cli.rs` — the command-line front-end. With no subcommand it runs the
+  daemon; with `register`/`unregister` it acts as a thin client that auto-starts
+  the daemon if needed and talks to it over HTTP (reusing `reqwest`, which the
+  proxy already depends on).
+
 ## Running
 
+With no subcommand, `switchelo` runs the daemon in the foreground:
+
 ```sh
-cargo run
+switchelo                  # serve on $BIND (default 0.0.0.0:8080)
+switchelo --bind 0.0.0.0:9000
 ```
+
+The `register` / `unregister` subcommands act as a **client**. If no daemon is
+running they auto-start one in the background, then send the request over HTTP:
+
+```sh
+switchelo register api http://127.0.0.1:8081 "main api"
+# -> registered 'api' -> http://127.0.0.1:8081 (id=0); route: /api/0/
+
+switchelo unregister 0
+```
+
+### Command-line usage
+
+- `switchelo [--bind <ADDR>]` — run the daemon.
+- `switchelo register <NAME> <URL> [DESCRIPTION]` — register a service
+  (auto-starts the daemon if needed). Equivalent to `POST /registry`.
+- `switchelo unregister <ID>` — deregister a service. Equivalent to
+  `POST /unregistry`.
+- `-b, --bind <ADDR>` — daemon listen/connect address (overrides `BIND`). A
+  wildcard host (`0.0.0.0`) is dialed as `127.0.0.1` by the client.
+- `-h, --help` — print help and exit.
 
 Environment variables:
 
-- `BIND` — listen address (default `0.0.0.0:8080`).
+- `BIND` — default address (default `0.0.0.0:8080`).
 - `RUST_LOG` — log filter (default `switchelo=info`).
 
 ## API
