@@ -8,8 +8,10 @@
 mod daemon;
 mod inputs;
 
+use clap::Parser;
+
 use daemon::Daemon;
-use inputs::cli::Action;
+use inputs::cli::Cli;
 
 #[tokio::main]
 async fn main() {
@@ -19,8 +21,9 @@ async fn main() {
         )
         .init();
 
-    match Action::parse() {
-        Action::Serve { bind } => inputs::http::serve(Daemon::new(), &bind).await,
-        action => inputs::cli::run_client(action).await,
+    let cli = Cli::parse();
+    match cli.command {
+        None => inputs::http::serve(Daemon::new(), &cli.bind).await,
+        Some(command) => inputs::cli::run_client(&cli.bind, command).await,
     }
 }

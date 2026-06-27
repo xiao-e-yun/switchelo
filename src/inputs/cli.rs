@@ -9,134 +9,55 @@
 use std::process::Stdio;
 use std::time::Duration;
 
-/// What the invocation asked switchelo to do.
-pub enum Action {
-    /// Run the daemon (HTTP server) in the foreground.
-    Serve { bind: String },
-    /// Register (or refresh) a service against a running daemon.
+use clap::{Parser, Subcommand};
+
+/// switchelo — a dynamic service registry and reverse proxy.
+#[derive(Parser)]
+#[command(name = "switchelo", version, about, long_about = None)]
+pub struct Cli {
+    /// Daemon listen/connect address. A wildcard host (0.0.0.0) is dialed as
+    /// 127.0.0.1 by the client subcommands.
+    #[arg(short, long, env = "BIND", default_value = "0.0.0.0:8080", global = true)]
+    pub bind: String,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+/// Client subcommands. Each auto-starts the daemon if one is not running, then
+/// sends the request over HTTP.
+#[derive(Subcommand)]
+pub enum Command {
+    /// Register (or refresh) a service.
     Register {
-        bind: String,
         name: String,
         url: String,
-        description: String,
+        description: Option<String>,
     },
-    /// Deregister a service by id against a running daemon.
-    Unregister { bind: String, id: u64 },
+    /// Deregister a service by id.
+    Unregister { id: u64 },
 }
 
-const HELP: &str = "\
-switchelo — a dynamic service registry and reverse proxy
-
-USAGE:
-    switchelo [--bind <ADDR>]                       Run the daemon
-    switchelo register <NAME> <URL> [DESCRIPTION]   Register a service
-    switchelo unregister <ID>                       Deregister a service
-
-The register/unregister subcommands auto-start the daemon in the background if
-one is not already running, then send the request over HTTP.
-
-OPTIONS:
-    -b, --bind <ADDR>   Daemon listen/connect address (default: 0.0.0.0:8080, or $BIND)
-    -h, --help          Print this help and exit
-
-ENVIRONMENT:
-    BIND        Default address.
-    RUST_LOG    Log filter (default: switchelo=info).
-
-EXAMPLES:
-    switchelo
-    switchelo register api http://127.0.0.1:8081 \"main api\"
-    switchelo unregister 0";
-
-impl Action {
-    /// The bind/connect address carried by every action.
-    fn bind(&self) -> &str {
-        match self {
-            Action::Serve { bind }
-            | Action::Register { bind, .. }
-            | Action::Unregister { bind, .. } => bind,
-        }
-    }
-
-    /// Parse process arguments. Prints help / errors and exits on misuse.
-    pub fn parse() -> Action {
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        let mut bind = std::env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
-        let mut positional: Vec<String> = Vec::new();
-
-        let mut i = 0;
-        while i < args.len() {
-            match args[i].as_str() {
-                "-h" | "--help" => {
-                    println!("{HELP}");
-                    std::process::exit(0);
-                }
-                "-b" | "--bind" => {
-                    i += 1;
-                    bind = args
-                        .get(i)
-                        .cloned()
-                        .unwrap_or_else(|| fail("--bind requires an address"));
-                }
-                s if s.starts_with('-') => fail(&format!("unknown option: {s}\n\n{HELP}")),
-                _ => positional.push(args[i].clone()),
-            }
-            i += 1;
-        }
-
-        match positional.first().map(String::as_str) {
-            None => Action::Serve { bind },
-            Some("register") => {
-                let name = positional
-                    .get(1)
-                    .cloned()
-                    .unwrap_or_else(|| fail("register requires <NAME> <URL> [DESCRIPTION]"));
-                let url = positional
-                    .get(2)
-                    .cloned()
-                    .unwrap_or_else(|| fail("register requires <NAME> <URL> [DESCRIPTION]"));
-                let description = positional.get(3).cloned().unwrap_or_default();
-                Action::Register {
-                    bind,
-                    name,
-                    url,
-                    description,
-                }
-            }
-            Some("unregister") => {
-                let id = positional
-                    .get(1)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or_else(|| fail("unregister requires a numeric <ID>"));
-                Action::Unregister { bind, id }
-            }
-            Some(other) => fail(&format!("unknown subcommand: {other}\n\n{HELP}")),
-        }
-    }
-}
-
-/// Run a client action: ensure the daemon is up, then send the request.
-pub async fn run_client(action: Action) {
-    let bind = action.bind().to_string();
-    let base = client_base_url(&bind);
-    ensure_daemon(&base, &bind).await;
+/// Run a client subcommand: ensure the daemon is up, then send the request.
+pub async fn run_client(bind: &str, command: Command) {
+    let base = client_base_url(bind);
+    ensure_daemon(&base, bind).await;
 
     let client = http_client(Duration::from_secs(5));
-    match action {
-        Action::Register {
+    match command {
+        Command::Register {
             name,
             url,
             description,
-            ..
         } => {
             let body = serde_json::json!({
-                "name": name, "url": url, "description": description,
+                "name": name, "url": url, "description": description.unwrap_or_default(),
             });
             let text = post(&client, &format!("{base}/registry"), &body).await;
             let id = parse_field(&text, "id");
             println!("registered '{name}' -> {url} (id={id}); route: /{name}/{id}/");
         }
-        Action::Unregister { id, .. } => {
+        Command::Unregister { id } => {
             let body = serde_json::json!({ "id": id });
             let text = post(&client, &format!("{base}/unregistry"), &body).await;
             match parse_field(&text, "success").as_str() {
@@ -144,7 +65,6 @@ pub async fn run_client(action: Action) {
                 _ => println!("no service with id={id} was registered"),
             }
         }
-        Action::Serve { .. } => unreachable!("serve is handled by the daemon path"),
     }
 }
 
