@@ -99,6 +99,8 @@ async fn forward(daemon: Daemon, name: String, id: u64, rest: &str, req: Request
 
     match upstream {
         Ok(resp) => {
+            // Backend reachable — clear any failure streak.
+            daemon.record_success(id);
             let status = resp.status();
             let resp_headers = resp.headers().clone();
             let stream = resp.bytes_stream();
@@ -111,10 +113,10 @@ async fn forward(daemon: Daemon, name: String, id: u64, rest: &str, req: Request
                 .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
         }
         Err(err) => {
-            // Backend unreachable -> active deregistration.
+            // Backend unreachable -> count it; only a sustained streak evicts.
             tracing::warn!(%target, error = %err, "forwarding failed");
-            if daemon.unregister(id) {
-                tracing::warn!(id, "service deregistered due to forwarding failure");
+            if daemon.record_failure(id) {
+                tracing::warn!(id, "service deregistered after consecutive forwarding failures");
             }
             (StatusCode::BAD_GATEWAY, "upstream unavailable").into_response()
         }

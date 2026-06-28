@@ -7,6 +7,11 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
+/// How many *consecutive* forwarding failures a service may accumulate before
+/// it is deregistered. A single success resets the count, so only a sustained
+/// outage evicts the backend.
+const MAX_FAILURES: u32 = 3;
+
 /// A registered backend service.
 #[derive(Clone, Debug)]
 pub struct Service {
@@ -14,6 +19,8 @@ pub struct Service {
     /// Backend base address, e.g. http://127.0.0.1:8081
     pub url: String,
     pub description: String,
+    /// Consecutive forwarding failures; reset on any success.
+    failures: u32,
 }
 
 /// Shared daemon state: the registry, an auto-increment id generator, and the
@@ -56,6 +63,8 @@ impl Daemon {
         if let Some((&id, existing)) = services.iter_mut().find(|(_, s)| s.url == url) {
             existing.name = name.clone();
             existing.description = description;
+            // A fresh report is a healthy signal — clear any stale failures.
+            existing.failures = 0;
             tracing::info!(id, name = %name, url = %url, "service re-registered (existing id reused)");
             return id;
         }
@@ -65,6 +74,7 @@ impl Daemon {
             name: name.clone(),
             url: url.clone(),
             description,
+            failures: 0,
         };
         services.insert(id, service);
         tracing::info!(id, name = %name, url = %url, "service registered");
@@ -75,6 +85,28 @@ impl Daemon {
     /// Callers log the reason (graceful unregister vs. forwarding failure).
     pub fn unregister(&self, id: u64) -> bool {
         self.services.write().unwrap().remove(&id).is_some()
+    }
+
+    /// Record a successful forward to `id`, clearing its failure streak.
+    pub fn record_success(&self, id: u64) {
+        if let Some(s) = self.services.write().unwrap().get_mut(&id) {
+            s.failures = 0;
+        }
+    }
+
+    /// Record a forwarding failure for `id`. Once the streak reaches
+    /// [`MAX_FAILURES`] the service is deregistered; returns `true` in that case.
+    pub fn record_failure(&self, id: u64) -> bool {
+        let mut services = self.services.write().unwrap();
+        let Some(s) = services.get_mut(&id) else {
+            return false;
+        };
+        s.failures += 1;
+        if s.failures < MAX_FAILURES {
+            return false;
+        }
+        services.remove(&id);
+        true
     }
 
     /// Snapshot of every registered service, sorted by id. Inputs shape this
@@ -89,5 +121,42 @@ impl Daemon {
     /// Look up a single service by id.
     pub fn get(&self, id: u64) -> Option<Service> {
         self.services.read().unwrap().get(&id).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn evicts_only_after_consecutive_failures() {
+        let daemon = Daemon::new();
+        let id = daemon.register("api".into(), "http://127.0.0.1:1".into(), String::new());
+
+        // Below the threshold the service survives.
+        for _ in 0..MAX_FAILURES - 1 {
+            assert!(!daemon.record_failure(id));
+            assert!(daemon.get(id).is_some());
+        }
+
+        // The Nth consecutive failure evicts it.
+        assert!(daemon.record_failure(id));
+        assert!(daemon.get(id).is_none());
+    }
+
+    #[test]
+    fn success_resets_the_failure_streak() {
+        let daemon = Daemon::new();
+        let id = daemon.register("api".into(), "http://127.0.0.1:1".into(), String::new());
+
+        for _ in 0..MAX_FAILURES - 1 {
+            assert!(!daemon.record_failure(id));
+        }
+        // A success clears the streak, so the next failures start counting over.
+        daemon.record_success(id);
+        for _ in 0..MAX_FAILURES - 1 {
+            assert!(!daemon.record_failure(id));
+            assert!(daemon.get(id).is_some());
+        }
     }
 }
