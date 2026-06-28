@@ -138,9 +138,6 @@ and a map of `id -> instance` for all instances running under that name.
 }
 ```
 
-Instances sharing a name are grouped together; the group's `description` is taken
-from one of them.
-
 ### `/{name}/{id}/...` — proxy
 
 Forwards the request to the backend registered as `id` (verifying that its name

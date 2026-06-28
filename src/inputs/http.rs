@@ -68,7 +68,6 @@ async fn unregister(
     Ok(Json(UnregisterRes { success }))
 }
 
-/// Proxy to the backend root: /{name}/{id}
 async fn proxy_root(
     State(daemon): State<Daemon>,
     Path((name, id)): Path<(String, u64)>,
@@ -77,7 +76,6 @@ async fn proxy_root(
     forward(daemon, name, id, "", req).await
 }
 
-/// Proxy to a backend sub-path: /{name}/{id}/{*rest}
 async fn proxy_path(
     State(daemon): State<Daemon>,
     Path((name, id, rest)): Path<(String, u64, String)>,
@@ -102,7 +100,6 @@ async fn forward(daemon: Daemon, name: String, id: u64, rest: &str, req: Request
         .unwrap_or_default();
     let target = format!("{}/{}{}", service.url, rest, query);
 
-    // Rebuild the request and send it to the backend.
     let method = req.method().clone();
     let headers = req.headers().clone();
     let body = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
@@ -120,7 +117,6 @@ async fn forward(daemon: Daemon, name: String, id: u64, rest: &str, req: Request
 
     match upstream {
         Ok(resp) => {
-            // Backend reachable — clear any failure streak.
             daemon.record_success(id);
             let status = resp.status();
             let resp_headers = resp.headers().clone();
