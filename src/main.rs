@@ -23,7 +23,10 @@ async fn main() {
 
     let cli = Cli::parse();
     match cli.command {
-        None => inputs::http::serve(Daemon::new(), &cli.bind).await,
-        Some(command) => inputs::cli::run_client(&cli.bind, command).await,
+        None => {
+            let addr = inputs::cli::resolve_bind(&cli.bind, cli.public);
+            inputs::http::serve(Daemon::new(), &addr).await
+        }
+        Some(command) => inputs::cli::run_client(&cli.bind, cli.public, command).await,
     }
 }

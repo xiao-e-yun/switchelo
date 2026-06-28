@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 /// How many *consecutive* forwarding failures a service may accumulate before
 /// it is deregistered. A single success resets the count, so only a sustained
@@ -41,10 +42,20 @@ impl Default for Daemon {
 
 impl Daemon {
     pub fn new() -> Self {
+        // The proxy client must never hang on a backend that accepts the
+        // connection but stalls: `connect_timeout` caps the dial, `read_timeout`
+        // caps the gap between reads (so it bounds idle stalls without killing
+        // legitimately long streams like SSE or large downloads).
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .read_timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
         Daemon {
             services: Arc::new(RwLock::new(HashMap::new())),
             next_id: Arc::new(AtomicU64::new(0)),
-            client: reqwest::Client::new(),
+            client,
         }
     }
 
@@ -54,9 +65,22 @@ impl Daemon {
     /// existing id and refreshes its name/description. The trailing slash is
     /// normalized so `http://host:8081` and `http://host:8081/` are the same
     /// backend.
-    pub fn register(&self, name: String, url: String, description: String) -> u64 {
+    /// Returns `Err` with a human-readable reason if the URL scheme is not one
+    /// we can forward to (only `http://` and `https://` are supported).
+    pub fn register(
+        &self,
+        name: String,
+        url: String,
+        description: String,
+    ) -> Result<u64, String> {
         // Trim trailing slash to avoid double slashes when forwarding.
         let url = url.trim_end_matches('/').to_string();
+
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err(format!(
+                "unsupported URL scheme (expected http:// or https://): {url}"
+            ));
+        }
 
         let mut services = self.services.write().unwrap();
 
@@ -66,7 +90,7 @@ impl Daemon {
             // A fresh report is a healthy signal — clear any stale failures.
             existing.failures = 0;
             tracing::info!(id, name = %name, url = %url, "service re-registered (existing id reused)");
-            return id;
+            return Ok(id);
         }
 
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -78,7 +102,7 @@ impl Daemon {
         };
         services.insert(id, service);
         tracing::info!(id, name = %name, url = %url, "service registered");
-        id
+        Ok(id)
     }
 
     /// Remove a service by id. Returns `true` if a service with that id existed.
@@ -131,7 +155,9 @@ mod tests {
     #[test]
     fn evicts_only_after_consecutive_failures() {
         let daemon = Daemon::new();
-        let id = daemon.register("api".into(), "http://127.0.0.1:1".into(), String::new());
+        let id = daemon
+            .register("api".into(), "http://127.0.0.1:1".into(), String::new())
+            .unwrap();
 
         // Below the threshold the service survives.
         for _ in 0..MAX_FAILURES - 1 {
@@ -145,9 +171,26 @@ mod tests {
     }
 
     #[test]
+    fn rejects_non_http_schemes_but_accepts_https() {
+        let daemon = Daemon::new();
+        assert!(
+            daemon
+                .register("api".into(), "ftp://host/x".into(), String::new())
+                .is_err()
+        );
+        assert!(
+            daemon
+                .register("api".into(), "https://host".into(), String::new())
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn success_resets_the_failure_streak() {
         let daemon = Daemon::new();
-        let id = daemon.register("api".into(), "http://127.0.0.1:1".into(), String::new());
+        let id = daemon
+            .register("api".into(), "http://127.0.0.1:1".into(), String::new())
+            .unwrap();
 
         for _ in 0..MAX_FAILURES - 1 {
             assert!(!daemon.record_failure(id));

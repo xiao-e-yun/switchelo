@@ -4,12 +4,13 @@
 //! shapes live in [`super::wire`], shared with the CLI client.
 
 use axum::body::Body;
-use axum::extract::{Path, Request, State};
+use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 
 use crate::daemon::Daemon;
 use crate::inputs::wire::{
@@ -29,22 +30,42 @@ async fn list(State(daemon): State<Daemon>) -> Json<HashMap<String, ServiceGroup
     Json(grouped)
 }
 
-/// POST /registry — a service registers itself.
-async fn register(State(daemon): State<Daemon>, Json(req): Json<RegisterReq>) -> Json<RegisterRes> {
-    let id = daemon.register(req.name, req.url, req.description);
-    Json(RegisterRes { id })
+/// Reject a mutating request that did not originate from loopback. Registration
+/// is local-only: a backend can only be (de)registered by a process on the same
+/// machine, so a remote client can never inject an arbitrary proxy target.
+fn require_loopback(peer: SocketAddr) -> Result<(), (StatusCode, &'static str)> {
+    if peer.ip().is_loopback() {
+        Ok(())
+    } else {
+        Err((StatusCode::FORBIDDEN, "registration is restricted to localhost"))
+    }
 }
 
-/// POST /unregistry — a service gracefully goes offline.
+/// POST /registry — a service registers itself (localhost only).
+async fn register(
+    State(daemon): State<Daemon>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(req): Json<RegisterReq>,
+) -> Result<Json<RegisterRes>, (StatusCode, String)> {
+    require_loopback(peer).map_err(|(s, m)| (s, m.to_string()))?;
+    match daemon.register(req.name, req.url, req.description) {
+        Ok(id) => Ok(Json(RegisterRes { id })),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e)),
+    }
+}
+
+/// POST /unregistry — a service gracefully goes offline (localhost only).
 async fn unregister(
     State(daemon): State<Daemon>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(req): Json<UnregisterReq>,
-) -> Json<UnregisterRes> {
+) -> Result<Json<UnregisterRes>, (StatusCode, &'static str)> {
+    require_loopback(peer)?;
     let success = daemon.unregister(req.id);
     if success {
         tracing::info!(id = req.id, "service unregistered");
     }
-    Json(UnregisterRes { success })
+    Ok(Json(UnregisterRes { success }))
 }
 
 /// Proxy to the backend root: /{name}/{id}
@@ -123,7 +144,9 @@ async fn forward(daemon: Daemon, name: String, id: u64, rest: &str, req: Request
     }
 }
 
-/// Build the axum router wired to the daemon.
+/// Build the axum router wired to the daemon. Mutating endpoints enforce
+/// localhost-only access in their handlers; `/list` and the proxy are open
+/// (subject to the bind address).
 fn router(daemon: Daemon) -> Router {
     Router::new()
         .route("/registry", post(register))
@@ -179,9 +202,17 @@ pub async fn serve(daemon: Daemon, addr: &str) {
     };
     if let Ok(bound) = listener.local_addr() {
         print_endpoints(bound);
+        if bound.ip().is_unspecified() {
+            eprintln!(
+                "note: bound to a public interface; remote clients can use the proxy, \
+                 but registration stays restricted to localhost."
+            );
+        }
     }
     tracing::info!("switchelo listening on {addr}");
-    if let Err(e) = axum::serve(listener, router(daemon)).await {
+    // `ConnectInfo` requires the peer address, so serve with it attached.
+    let service = router(daemon).into_make_service_with_connect_info::<SocketAddr>();
+    if let Err(e) = axum::serve(listener, service).await {
         eprintln!("error: server stopped: {e}");
         std::process::exit(1);
     }

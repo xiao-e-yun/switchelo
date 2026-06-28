@@ -10,9 +10,13 @@ on the URL path. Dead backends are removed automatically.
 - **Dynamic unregistration** — services go offline gracefully via `POST /unregistry`.
 - **Path-based routing & stripping** — `/{name}/{id}/...` is forwarded to the
   matching backend with the `/{name}/{id}` prefix stripped.
-- **Fault tolerance** — when forwarding fails (backend unreachable), the service
-  is deregistered automatically.
+- **Fault tolerance** — after several *consecutive* forwarding failures (a
+  backend stays unreachable) the service is deregistered automatically; any
+  success resets the streak.
 - **Listing** — inspect the registry via `/list`.
+- **Local-only registration** — `POST /registry` and `POST /unregistry` are
+  accepted only from `localhost`, so a publicly bound proxy can never have
+  arbitrary backends injected remotely.
 
 ## Architecture
 
@@ -29,12 +33,18 @@ to register, unregister, list, and look up services. It is driven through
 
 ## Running
 
-With no subcommand, `switchelo` runs the daemon in the foreground:
+With no subcommand, `switchelo` runs the daemon in the foreground. It binds to
+loopback by default, so the registry is private to the local machine:
 
 ```sh
-switchelo                  # serve on $BIND (default 0.0.0.0:8080)
-switchelo --bind 0.0.0.0:9000
+switchelo                  # serve on $BIND (default 127.0.0.1:8080)
+switchelo --bind 127.0.0.1:9000
+switchelo --public         # expose the proxy & /list on all interfaces (0.0.0.0)
 ```
+
+`--public` opens the **proxy** and `/list` to the network so other machines can
+consume registered services. Registration stays restricted to `localhost`
+regardless — remote clients can use backends but cannot register them.
 
 The `register` / `unregister` subcommands act as a **client**. If no daemon is
 running they auto-start one in the background, then send the request over HTTP:
@@ -48,25 +58,29 @@ switchelo unregister 0
 
 ### Command-line usage
 
-- `switchelo [--bind <ADDR>]` — run the daemon.
+- `switchelo [--bind <ADDR>] [--public]` — run the daemon.
 - `switchelo register <NAME> <URL> [DESCRIPTION]` — register a service
   (auto-starts the daemon if needed). Equivalent to `POST /registry`.
 - `switchelo unregister <ID>` — deregister a service. Equivalent to
   `POST /unregistry`.
 - `-b, --bind <ADDR>` — daemon listen/connect address (overrides `BIND`). A
   wildcard host (`0.0.0.0`) is dialed as `127.0.0.1` by the client.
+- `--public` — bind the daemon to `0.0.0.0` instead of loopback (the proxy and
+  `/list` only; registration remains localhost-only).
 - `-h, --help` — print help and exit.
 
 Environment variables:
 
-- `BIND` — default address (default `0.0.0.0:8080`).
+- `BIND` — default address (default `127.0.0.1:8080`).
 - `RUST_LOG` — log filter (default `switchelo=info`).
 
 ## API
 
 ### `POST /registry`
 
-Register a backend service.
+Register a backend service. **Localhost-only** — requests from a non-loopback
+address are rejected with `403 Forbidden`. The `url` must be `http://` or
+`https://` (any other scheme is rejected with `400 Bad Request`).
 
 Request:
 
@@ -91,7 +105,7 @@ creating a duplicate entry. The trailing slash is normalized, so
 
 ### `POST /unregistry`
 
-Deregister a service.
+Deregister a service. **Localhost-only**, same as `POST /registry`.
 
 Request:
 
@@ -139,12 +153,14 @@ preserved.
 | `/api/0/docs`       | `/docs`              |
 | `/api/0/search?q=1` | `/search?q=1`        |
 
-If the backend cannot be reached, the proxy returns `502 Bad Gateway` and the
-service is removed from the registry.
+If the backend cannot be reached, the proxy returns `502 Bad Gateway`. The
+service is removed from the registry only after several *consecutive* failures;
+a single successful forward resets the count.
 
 ## Notes / limitations
 
 - The registry is in-memory only; restarting the server clears it.
-- The HTTP client has no request timeout, so a backend that accepts the
-  connection but never responds will not trigger active deregistration.
+- The proxy client applies a connect timeout and an idle read timeout, so a
+  backend that stalls is bounded without cutting off legitimate long-lived
+  streams.
 - The request body is buffered fully in memory before forwarding.

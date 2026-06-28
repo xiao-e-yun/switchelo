@@ -20,12 +20,29 @@ use crate::inputs::wire::{RegisterReq, RegisterRes, UnregisterReq, UnregisterRes
 #[command(name = "switchelo", version, about, long_about = None)]
 pub struct Cli {
     /// Daemon listen/connect address. A wildcard host (0.0.0.0) is dialed as
-    /// 127.0.0.1 by the client subcommands.
-    #[arg(short, long, env = "BIND", default_value = "0.0.0.0:8080", global = true)]
+    /// 127.0.0.1 by the client subcommands. Defaults to loopback so the daemon
+    /// is private unless `--public` is given.
+    #[arg(short, long, env = "BIND", default_value = "127.0.0.1:8080", global = true)]
     pub bind: String,
+
+    /// Expose the daemon on all interfaces (0.0.0.0) instead of loopback only.
+    /// Registration stays localhost-only regardless; this only opens the proxy
+    /// and `/list` to the network.
+    #[arg(long, global = true)]
+    pub public: bool,
 
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+/// Resolve the effective daemon bind address. `--public` swaps the host for the
+/// wildcard `0.0.0.0`, preserving the configured port.
+pub fn resolve_bind(bind: &str, public: bool) -> String {
+    if !public {
+        return bind.to_string();
+    }
+    let port = bind.rsplit_once(':').map(|(_, p)| p).unwrap_or("8080");
+    format!("0.0.0.0:{port}")
 }
 
 /// Client subcommands. Each auto-starts the daemon if one is not running, then
@@ -43,9 +60,9 @@ pub enum Command {
 }
 
 /// Run a client subcommand: ensure the daemon is up, then send the request.
-pub async fn run_client(bind: &str, command: Command) {
+pub async fn run_client(bind: &str, public: bool, command: Command) {
     let base = client_base_url(bind);
-    ensure_daemon(&base, bind).await;
+    ensure_daemon(&base, bind, public).await;
 
     let client = http_client(Duration::from_secs(5));
     match command {
@@ -76,14 +93,14 @@ pub async fn run_client(bind: &str, command: Command) {
 }
 
 /// Ensure a daemon is reachable at `base`, auto-starting one bound to `bind`.
-async fn ensure_daemon(base: &str, bind: &str) {
+async fn ensure_daemon(base: &str, bind: &str, public: bool) {
     let probe = http_client(Duration::from_millis(300));
     if reachable(&probe, base).await {
         return;
     }
 
     eprintln!("daemon not running; starting it in the background...");
-    spawn_daemon(bind);
+    spawn_daemon(bind, public);
 
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -99,14 +116,17 @@ async fn reachable(client: &reqwest::Client, base: &str) -> bool {
     client.get(format!("{base}/list")).send().await.is_ok()
 }
 
-/// Spawn `switchelo --bind <bind>` as a detached background daemon.
-fn spawn_daemon(bind: &str) {
+/// Spawn `switchelo --bind <bind>` as a detached background daemon, forwarding
+/// the `--public` flag so the auto-started daemon matches intent.
+fn spawn_daemon(bind: &str, public: bool) {
     let exe = std::env::current_exe()
         .unwrap_or_else(|e| fail(&format!("cannot locate switchelo executable: {e}")));
     let mut cmd = std::process::Command::new(exe);
-    cmd.arg("--bind")
-        .arg(bind)
-        .stdin(Stdio::null())
+    cmd.arg("--bind").arg(bind);
+    if public {
+        cmd.arg("--public");
+    }
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     detach(&mut cmd);
@@ -144,10 +164,14 @@ async fn post<B: Serialize, R: DeserializeOwned>(
         .send()
         .await
         .unwrap_or_else(|e| fail(&format!("request to {url} failed: {e}")));
+    let status = resp.status();
     let text = resp
         .text()
         .await
         .unwrap_or_else(|e| fail(&format!("reading response from {url} failed: {e}")));
+    if !status.is_success() {
+        fail(&format!("daemon rejected request ({status}): {text}"));
+    }
     serde_json::from_str(&text)
         .unwrap_or_else(|_| fail(&format!("unexpected daemon response: {text}")))
 }
